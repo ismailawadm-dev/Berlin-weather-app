@@ -13,19 +13,21 @@ for p in (ROOT, SRC):
 
 # import with fallback
 try:
-    # when the project uses "src" as a package (root on sys.path)
+    # when the project uses "src" as a package
     from src.utils.timealign import to_3h_bins
 except ModuleNotFoundError:
     try:
-        # when the "src" folder itself is put on sys.path
+        # when a "utils" package exists
         from utils.timealign import to_3h_bins
     except ModuleNotFoundError:
-        # ultimate fallback: implement it here
-        import pandas as pd
-        def to_3h_bins(dt_index):
-            # bin timestamps to 3-hour buckets
-            return pd.DatetimeIndex(pd.to_datetime(dt_index)).floor("3H")
-
+        try:
+            # when timealign.py sits at the project root (your case)
+            from timealign import to_3h_bins
+        except ModuleNotFoundError:
+            # ultimate fallback: define a simple helper here
+            import pandas as pd
+            def to_3h_bins(dt_index):
+                return pd.DatetimeIndex(pd.to_datetime(dt_index)).floor("3H")
 # regular imports
 import numpy as np
 import pandas as pd
