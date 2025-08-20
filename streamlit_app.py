@@ -1,5 +1,5 @@
 # --- path bootstrap (must be first) ---
-import sys
+import importlib.util, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -12,15 +12,29 @@ for p in (ROOT, SRC):
 import datetime as dt
 import pandas as pd
 import streamlit as st
-from config import Cfg
+try:
+    from src.config import Cfg
+except ModuleNotFoundError:
+    from config import Cfg
 try:
     from gefs import GEFSDownloader
 except Exception:
     GEFSDownloader = None  # herbie isn't installed on Cloud; keep GEFS optional
 from make_features import summarize_ensemble
-from prob_model import ProbModel
-from quant_model import QuantileModel
-from calib import Calibrator
+try:
+    from src.modeling.prob_model import ProbModel
+except ModuleNotFoundError:
+    from prob_model import ProbModel
+
+try:
+    from src.modeling.quant_model import QuantileModel
+except ModuleNotFoundError:
+    from quant_model import QuantileModel
+
+try:
+    from src.modeling.calib import Calibrator
+except ModuleNotFoundError:
+    from calib import Calibrator
 # --- alerts imports (with fallback for src/ layout) ---
 try:
     from src.alerts.watch_imminent import (
@@ -65,26 +79,39 @@ if not models_loaded:
     if st.button("Train models (3 years)"):
         with st.spinner("Training… this can take several minutes on first run"):
             import subprocess
-            subprocess.run(["python","-m","src.train","--start","2022-01-01","--end", dt.date.today().isoformat()], check=True)
+            mod = "src.train" if importlib.util.find_spec("src.train") else "train"
+            subprocess.run(
+                [sys.executable, "-m", mod, "--start", "2022-01-01", "--end", dt.date.today().isoformat()],
+                check=True,
+            )
         st.experimental_rerun()
 else:
-    dl = GEFSDownloader(cfg)
-    ds = dl.stack_members(sel_date.isoformat(), runhour, members=cfg["features"]["members"], leads=cfg["features"]["leads_hours"], bbox=tuple(cfg["location"]["bbox"]))
-    X = summarize_ensemble(ds, lat, lon)
-    raw_p = pm.predict_proba(X)
-    p_cal = cal.predict(raw_p)
-    q = qm.predict(X)
-    out = X.copy()
-    out["PoP"] = p_cal
-    out["P50mm"] = q[0.5]
-    out["P75mm"] = q[0.75]
-    out["P90mm"] = q[0.9]
-    daily = out.resample("1D").agg({"PoP":"mean","P50mm":"sum","P75mm":"sum","P90mm":"sum"})
-    daily["Risk"] = pd.cut(daily["PoP"],[0,0.3,0.6,1.0],labels=["Low","Med","High"],include_lowest=True)
-    st.write("**Daily summary**")
-    st.dataframe(daily.style.format({"PoP":"{:.0%}","P50mm":"{:.1f}","P75mm":"{:.1f}","P90mm":"{:.1f}"}))
-    st.write("**3‑hour bins**")
-    st.dataframe(out[["PoP","P50mm","P75mm","P90mm"]].style.format({"PoP":"{:.0%}","P50mm":"{:.1f}","P75mm":"{:.1f}","P90mm":"{:.1f}"}))
+    if GEFSDownloader is None:
+        st.warning("GEFS download is disabled in this environment, so the day-prediction section is skipped.")
+    else:
+        dl = GEFSDownloader(cfg)
+        ds = dl.stack_members(
+            sel_date.isoformat(),
+            runhour,
+            members=cfg["features"]["members"],
+            leads=cfg["features"]["leads_hours"],
+            bbox=tuple(cfg["location"]["bbox"]),
+        )
+        X = summarize_ensemble(ds, lat, lon)
+        raw_p = pm.predict_proba(X)
+        p_cal = cal.predict(raw_p)
+        q = qm.predict(X)
+        out = X.copy()
+        out["PoP"] = p_cal
+        out["P50mm"] = q[0.5]
+        out["P75mm"] = q[0.75]
+        out["P90mm"] = q[0.9]
+        daily = out.resample("1D").agg({"PoP":"mean","P50mm":"sum","P75mm":"sum","P90mm":"sum"})
+        daily["Risk"] = pd.cut(daily["PoP"],[0,0.3,0.6,1.0],labels=["Low","Med","High"],include_lowest=True)
+        st.write("**Daily summary**")
+        st.dataframe(daily.style.format({"PoP":"{:.0%}","P50mm":"{:.1f}","P75mm":"{:.1f}","P90mm":"{:.1f}"}))
+        st.write("**3-hour bins**")
+        st.dataframe(out[["PoP","P50mm","P75mm","P90mm"]].style.format({"PoP":"{:.0%}","P50mm":"{:.1f}","P75mm":"{:.1f}","P90mm":"{:.1f}"}))
 
 st.markdown("---")
 st.subheader("2) Imminent rain (next 10–30 min)")
