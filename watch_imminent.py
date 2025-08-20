@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pysteps as ps
-from wetterdienst.provider.dwd.radar import DwdRadarValues  # <-- no enum import
+from wetterdienst.provider.dwd.radar import DwdRadarValues  # note: no enums imported
 from wetterdienst import Period
 
 # Prefer src.config.Cfg if a src/ layout exists; otherwise use local config.py
@@ -38,7 +38,7 @@ def desktop_notify(title: str, message: str) -> None:
     try:
         if os_name == "Darwin":
             subprocess.run(
-                ["osascript", "-e", f'display notification "{message}" with title "{title}"'],
+                ["osascript", "-e", f'display notification \"{message}\" with title \"{title}\"'],
                 check=False,
             )
         elif os_name == "Linux":
@@ -61,33 +61,41 @@ def _first_var_name(ds):
     return next(iter(ds.data_vars))
 
 
-def fetch_radar_last_hour():
+def fetch_radar_last_hour(debug: bool = False):
     """
     Fetch last hour of DWD composite reflectivity (5-min) as DataArray [time,y,x] in dBZ.
 
-    We avoid the enum and try multiple parameter spellings to be compatible across
-    wetterdienst versions.
+    We avoid fragile enums and try a few parameter/subset spellings that differ
+    across wetterdienst versions.
     """
     end = datetime.utcnow().replace(second=0, microsecond=0)
     start = end - timedelta(minutes=60)
 
-    last_err = None
-    for param in ("rx", "RX", "reflectivity", "RADAR_REFLECTIVITY"):
-        try:
-            values = DwdRadarValues(
-                parameter=param,         # <-- string instead of enum
-                start_date=start,
-                end_date=end,
-                period=Period.MINUTE_5,
-            )
-            ds = values.to_xarray()
-            var = "value" if "value" in ds.variables else _first_var_name(ds)
-            return ds[var].transpose("time", "y", "x").astype(float)
-        except Exception as e:
-            last_err = e
-            continue
+    # Try multiple spellings for backwards/forwards compatibility
+    param_opts = ("rx", "RX", "reflectivity", "RADAR_REFLECTIVITY")
+    subset_opts = ("germany", "composite", None)  # some versions use "germany", others "composite"
+    period_opts = (Period.MINUTE_5, "minute_5")   # accept enum or string
 
-    raise RuntimeError(f"Could not fetch DWD radar reflectivity (last error: {last_err})")
+    last_err = None
+    for param in param_opts:
+        for subset in subset_opts:
+            for period in period_opts:
+                try:
+                    kwargs = dict(parameter=param, start_date=start, end_date=end, period=period)
+                    if subset is not None:
+                        kwargs["subset"] = subset
+                    values = DwdRadarValues(**kwargs)
+                    ds = values.to_xarray()
+                    var = "value" if "value" in ds.variables else _first_var_name(ds)
+                    da = ds[var].transpose("time", "y", "x").astype(float)
+                    if debug:
+                        print(f"[watch_imminent] DWD radar OK with param={param}, subset={subset}, period={period}")
+                    return da
+                except Exception as e:
+                    last_err = e
+                    continue
+
+    raise RuntimeError(f"Could not fetch DWD radar reflectivity; last error was: {last_err!r}")
 
 
 def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
