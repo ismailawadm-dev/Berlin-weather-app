@@ -1,21 +1,26 @@
-# --- path bootstrap (put at line 1 of make_features.py) ---
+# make_features.py
+from __future__ import annotations   # <-- must be first (after optional comments/docstring)
+
+# path bootstrap
 import sys
 from pathlib import Path
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+for p in (ROOT, SRC):
+    s = str(p)
+    if s not in sys.path:
+        sys.path.insert(0, s)
 
-ROOT = Path(__file__).resolve().parent        # project root (folder with streamlit_app.py)
-SRC  = ROOT / "src"
-
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-
-# primary import (package style); fallback to plain 'utils' if needed
+# import with fallback
 try:
     from src.utils.timealign import to_3h_bins
 except ModuleNotFoundError:
     from utils.timealign import to_3h_bins
-# --- end bootstrap ---
+
+# regular imports
+import numpy as np
+import pandas as pd
+import xarray as xr
 from __future__ import annotations
 import numpy as np
 import pandas as pd
