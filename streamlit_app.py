@@ -37,18 +37,18 @@ except ModuleNotFoundError:
     from calib import Calibrator
 # --- alerts imports (with fallback for src/ layout) ---
 try:
-    from src.alerts.watch_imminent import (
+    from src.watch_imminent import (
         fetch_radar_last_hour,
         reflectivity_to_rainrate,
         berlin_point_index,
     )
 except ModuleNotFoundError:
-    from alerts.watch_imminent import (
+    from watch_imminent import (
         fetch_radar_last_hour,
         reflectivity_to_rainrate,
         berlin_point_index,
     )
-# --- end alerts imports --- 
+# --- end alerts imports ---
 import numpy as np
 
 st.set_page_config(page_title="Berlin Rain Planning", page_icon="☔", layout="centered")
