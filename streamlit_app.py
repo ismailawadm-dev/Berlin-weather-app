@@ -53,7 +53,7 @@ lat = cfg["location"]["lat"]; lon = cfg["location"]["lon"]
 st.sidebar.header("Controls")
 sel_date = st.sidebar.date_input("Target date", dt.date.today())
 runhour = st.sidebar.selectbox("Model run hour (UTC)", [0,6,12,18], index=0)
-lead_minutes = st.sidebar.slider("Imminent alert horizon (min)", 5, 30, 10, 5)
+lead_minutes = st.sidebar.slider("Imminent alert horizon (min)", 5, 60, 60, 5)
 rain_thr = st.sidebar.slider("Rain rate threshold (mm/h)", 0.1, 2.0, 0.6, 0.1)
 
 # Load models if present
