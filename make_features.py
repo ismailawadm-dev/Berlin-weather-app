@@ -1,5 +1,5 @@
 # make_features.py
-from __future__ import annotations   # <-- must be first (after optional comments/docstring)
+from __future__ import annotations
 
 # path bootstrap
 import sys
@@ -21,12 +21,6 @@ except ModuleNotFoundError:
 import numpy as np
 import pandas as pd
 import xarray as xr
-from __future__ import annotations
-import numpy as np
-import pandas as pd
-import xarray as xr
-# make_features.py
-from src.utils.timealign import to_3h_bins
 def summarize_ensemble(ds: xr.Dataset, lat, lon) -> pd.DataFrame:
     point = ds.sel(latitude=lat, longitude=lon, method="nearest")
     df_list = []
