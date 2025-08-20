@@ -8,9 +8,13 @@ except Exception:
     GEFSDownloader = None  # herbie isn't installed on Cloud; keep GEFS optional
 from make_features import summarize_ensemble
 from prob_model import ProbModel
-from src.modeling.quant_model import QuantileModel
-from src.modeling.calib import Calibrator
-from src.alerts.watch_imminent import fetch_radar_last_hour, reflectivity_to_rainrate, berlin_point_index
+from quant_model import QuantileModel
+from calib import Calibrator
+from alerts.watch_imminent import (
+    fetch_radar_last_hour,
+    reflectivity_to_rainrate,
+    berlin_point_index,
+)
 import numpy as np
 
 st.set_page_config(page_title="Berlin Rain Planning", page_icon="☔", layout="centered")
