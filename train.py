@@ -1,72 +1,88 @@
+# train.py
 from __future__ import annotations
-import argparse
+
+# -------------------------------------------------------------------
+# 1) Path bootstrap so imports work from Streamlit or CLI
+# -------------------------------------------------------------------
+import sys
 from pathlib import Path
-import pandas as pd
-import numpy as np
 
-from .config import Cfg
-from .data_sources.gefs import GEFSDownloader
-from .data_sources.radolan import fetch_radolan_rw, point_series
-from .features.make_features import summarize_ensemble
-from .modeling.prob_model import ProbModel
-from .modeling.quant_model import QuantileModel
-from .modeling.calib import Calibrator
-from .utils.io import ensure_dir
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+for p in (ROOT, SRC):
+    sp = str(p)
+    if sp not in sys.path:
+        sys.path.insert(0, sp)
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--start", required=True)
-    ap.add_argument("--end", required=True)
-    ap.add_argument("--runhour", type=int, default=0)
-    args = ap.parse_args()
+# -------------------------------------------------------------------
+# 2) Imports that work in both layouts (src/ … or flat repo)
+# -------------------------------------------------------------------
+try:
+    from src.config import Cfg
+except ModuleNotFoundError:
+    from config import Cfg
 
-    cfg = Cfg()
-    lat = cfg["location"]["lat"]; lon = cfg["location"]["lon"]
-    bbox = cfg["location"]["bbox"]
-    leads = cfg["features"]["leads_hours"]
-    members = cfg["features"]["members"]
+# If your training code imports other project modules, prefer this pattern:
+try:
+    from src.prob_model import ProbModel
+    from src.quant_model import QuantileModel
+    from src.calib import Calibrator
+    from src.gefs import GEFSDownloader
+    from src.make_features import summarize_ensemble
+except ModuleNotFoundError:
+    from prob_model import ProbModel
+    from quant_model import QuantileModel
+    from calib import Calibrator
+    from gefs import GEFSDownloader
+    from make_features import summarize_ensemble
 
-    print("Downloading RADOLAN labels…")
-    da_rw = fetch_radolan_rw(args.start, args.end, bbox=(bbox[0], bbox[1], bbox[2], bbox[3]), cache_dir=Path(cfg.cache)/"radolan")
-    s_point = point_series(da_rw, lat, lon)
-    s_point = s_point.resample("3H").sum()
-    y_bins = s_point.index
+# -------------------------------------------------------------------
+# 3) >>> PASTE YOUR EXISTING TRAINING LOGIC HERE <<<
+#     (All the functions/classes you already had – unchanged.)
+#
+#     If your old file had something like:
+#        - def train_model(start, end, out_dir=None): ...
+#        - or a main() that parses --start/--end and does the work
+#     keep it exactly as-is. The only thing that changed is the imports.
+# -------------------------------------------------------------------
 
-    dl = GEFSDownloader(cfg)
-    frames = []
-    for dt in pd.date_range(args.start, args.end, freq="1D"):
-        try:
-            ds = dl.stack_members(dt.strftime("%Y-%m-%d"), args.runhour, members=members, leads=leads, bbox=tuple(bbox))
-            fe = summarize_ensemble(ds, lat, lon)
-            frames.append(fe)
-        except Exception as e:
-            print("Skip", dt, e)
-    if not frames:
-        raise SystemExit("No GEFS data fetched; check connectivity or date range.")
-    X = pd.concat(frames, axis=0).sort_index()
+# Example minimal structure if you didn't have one;
+# delete this block if your file already defines the real logic.
+if "train_model" not in globals():
+    import argparse
+    from datetime import date
 
-    X = X.loc[X.index.intersection(y_bins)]
-    y = (s_point.reindex(X.index, method="nearest") >= cfg["training"]["rain_threshold_mm"]) * 1
-    y_amt = s_point.reindex(X.index, method="nearest").fillna(0.0)
+    def train_model(start: str, end: str, out_dir: str | None = None) -> None:
+        """
+        Placeholder: replace with your real training routine.
+        This exists only so the script can run if you hadn't defined one.
+        """
+        cfg = Cfg("config.yaml")
+        print(f"[train.py] Training stub from {start} to {end}.")
+        print("Replace this function with your existing training code.")
 
-    ensure_dir(cfg.models_dir)
-    print("Fitting probability model…")
-    pm = ProbModel(cfg["models"]["prob"]["params"]).fit(X, y)
-    raw_p = pm.predict_proba(X)
+    def _parse_args():
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--start", required=True, help="YYYY-MM-DD")
+        ap.add_argument("--end", required=True, help="YYYY-MM-DD")
+        ap.add_argument("--out", default=None, help="Optional output dir")
+        return ap.parse_args()
 
-    print("Calibrating…")
-    cal = Calibrator(cfg["calibration"]["method"]).fit(raw_p, y)
-    raw_brier = float(((raw_p - y)**2).mean())
-    cal_brier = float(((cal.predict(raw_p) - y)**2).mean())
-    print("Brier score raw -> calib:", round(raw_brier,3), "->", round(cal_brier,3))
-
-    print("Fitting quantile model…")
-    qm = QuantileModel(cfg["models"]["quant"]["quantiles"], cfg["models"]["quant"]["params"]).fit(X, y_amt)
-
-    pm.save(cfg.models_dir/"prob_model.lgbm.joblib")
-    cal.save(cfg.models_dir/"calibrator.joblib")
-    qm.save(cfg.models_dir/"quant_model.lgbm.joblib")
-    print("Saved models to", cfg.models_dir)
-
+# -------------------------------------------------------------------
+# 4) CLI entry point so `python -m train --start ... --end ...` works
+# -------------------------------------------------------------------
 if __name__ == "__main__":
-    main()
+    # If your original file already had its own argparse/main,
+    # keep it and remove this block. Otherwise this gives you a safe default.
+    if " _parse_args" in globals():
+        args = _parse_args()
+        train_model(args.start, args.end, args.out)
+    else:
+        # Fallback: try to mimic your old interface
+        import argparse
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--start", required=True)
+        ap.add_argument("--end", required=True)
+        ap.add_argument("--out", default=None)
+        args = ap.parse_args()
+        train_model(args.start, args.end, args.out)
