@@ -1,3 +1,14 @@
+# --- add this at the very top of streamlit_app.py ---
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+for p in (ROOT, SRC):
+    p = str(p)
+    if p not in sys.path:
+        sys.path.insert(0, p)
+# --- end bootstrapping ---
 import datetime as dt
 import pandas as pd
 import streamlit as st
