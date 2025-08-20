@@ -1,37 +1,74 @@
+# watch_imminent.py
 from __future__ import annotations
-import os, time, json, platform, subprocess
+
+# --- path bootstrap (works whether you run this file directly or via Streamlit) ---
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+SRC = ROOT / "src"
+for p in (ROOT, SRC):
+    s = str(p)
+    if s not in sys.path:
+        sys.path.insert(0, s)
+# --- end bootstrap ---
+
+import time
+import json
+import platform
+import subprocess
 from datetime import datetime, timedelta
+
 import numpy as np
-import xarray as xr
 import pysteps as ps
-from wetterdienst.provider.dwd.radar import DwdRadarValues, DwdRadarParameter, DwdRadarDataSubset
+from wetterdienst.provider.dwd.radar import (
+    DwdRadarValues,
+    DwdRadarParameter,
+    DwdRadarDataSubset,
+)
 from wetterdienst import Period
 
-from ..config import Cfg
+# Prefer src.config.Cfg if project uses a src/ layout; fall back to local config.py
+try:
+    from src.config import Cfg
+except ModuleNotFoundError:
+    from config import Cfg
 
 STATE_FILE = ".alert_state.json"
 
-def desktop_notify(title, message):
-    sys = platform.system()
+
+def desktop_notify(title: str, message: str) -> None:
+    """Best-effort desktop popup (macOS/Linux). Silently ignored if unavailable."""
+    os_name = platform.system()
     try:
-        if sys == "Darwin":
-            subprocess.run(["osascript", "-e", f'display notification "{message}" with title "{title}"'], check=False)
-        elif sys == "Linux":
+        if os_name == "Darwin":
+            subprocess.run(
+                ["osascript", "-e", f'display notification "{message}" with title "{title}"'],
+                check=False,
+            )
+        elif os_name == "Linux":
             subprocess.run(["notify-send", title, message], check=False)
     except Exception:
+        # Notifications are best-effort; ignore failures
         pass
 
-def slack_notify(webhook_url, title, message):
-    import requests
+
+def slack_notify(webhook_url: str | None, title: str, message: str) -> None:
+    """Send a simple Slack message via incoming webhook."""
     if not webhook_url:
         return
+    import requests  # local import to avoid a hard dependency if unused
+
     payload = {"text": f"*{title}*\n{message}"}
     try:
         requests.post(webhook_url, json=payload, timeout=5)
     except Exception:
+        # Network errors shouldn't crash the loop
         pass
 
+
 def fetch_radar_last_hour():
+    """Fetch last hour of DWD RX reflectivity at 5-min steps as xarray DataArray [time,y,x]."""
     end = datetime.utcnow().replace(second=0, microsecond=0)
     start = end - timedelta(minutes=60)
     values = DwdRadarValues(
@@ -41,69 +78,91 @@ def fetch_radar_last_hour():
         subset=DwdRadarDataSubset.GERMANY,
         period=Period.MINUTE_5,
     )
-    ds = values.to_xarray()
-    return ds["value"].transpose("time","y","x").astype(float)
+    ds = values.to_xarray()  # Dataset with variable "value"
+    return ds["value"].transpose("time", "y", "x").astype(float)
 
-def reflectivity_to_rainrate(Z):
-    Z_lin = 10 ** (Z / 10.0)
-    R = (Z_lin / 200.0) ** (1.0/1.6)
+
+def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
+    """Marshall–Palmer: Z=200*R^1.6  ->  R=(Z/200)^(1/1.6). Z is in dBZ."""
+    Z_lin = 10.0 ** (Z / 10.0)
+    R = (Z_lin / 200.0) ** (1.0 / 1.6)
     R[np.isnan(R)] = 0.0
     return R
 
-def berlin_point_index(da, lat, lon):
-    if "latitude" in da.coords and "longitude" in da.coords:
-        j = np.abs(da.coords["latitude"].values - lat).argmin()
-        i = np.abs(da.coords["longitude"].values - lon).argmin()
-    else:
-        j = da.shape[1]//2; i = da.shape[2]//2
-    return int(j), int(i)
 
-def main_loop():
-    cfg = Cfg()
+def berlin_point_index(da, lat: float, lon: float) -> tuple[int, int]:
+    """Find nearest grid index to (lat,lon). If coords missing, use grid center."""
+    if "latitude" in da.coords and "longitude" in da.coords:
+        j = int(np.abs(da.coords["latitude"].values - lat).argmin())
+        i = int(np.abs(da.coords["longitude"].values - lon).argmin())
+    else:
+        j = int(da.shape[1] // 2)
+        i = int(da.shape[2] // 2)
+    return j, i
+
+
+def main_loop() -> None:
+    cfg = Cfg("config.yaml")  # be explicit like in streamlit_app.py
     a = cfg["alerts"]
-    if not a["enabled"]:
+
+    if not a.get("enabled", False):
         print("Alerts disabled in config.")
         return
-    lat = a.get("lat", cfg["location"]["lat"]); lon = a.get("lon", cfg["location"]["lon"])
-    lead_min = int(a.get("lead_minutes",10))
-    thr = float(a.get("rainrate_threshold_mmph",0.2))
-    cooldown = int(a.get("cooldown_minutes",30))
-    slack_url = a.get("channels",{}).get("slack_webhook","")
-    use_popup = a.get("channels",{}).get("desktop_notify", True)
 
+    lat = a.get("lat", cfg["location"]["lat"])
+    lon = a.get("lon", cfg["location"]["lon"])
+    lead_min = int(a.get("lead_minutes", 10))
+    thr = float(a.get("rainrate_threshold_mmph", 0.2))
+    cooldown = int(a.get("cooldown_minutes", 30))
+    slack_url = a.get("channels", {}).get("slack_webhook", "")
+    use_popup = a.get("channels", {}).get("desktop_notify", True)
+    check_interval = int(a.get("check_interval_sec", 180))
+
+    # Load last alert time (for cooldown)
     try:
-        with open(STATE_FILE,"r") as f:
+        with open(STATE_FILE, "r") as f:
             state = json.load(f)
     except Exception:
         state = {"last_alert_ts": "1970-01-01T00:00:00Z"}
 
     while True:
         try:
-            rx = fetch_radar_last_hour()
-            R = reflectivity_to_rainrate(rx.values)
+            # 1) Fetch & nowcast
+            rx = fetch_radar_last_hour()  # DataArray [time,y,x] in dBZ
+            R = reflectivity_to_rainrate(rx.values)  # mm/h
             oflow = ps.motion.get_method("lucaskanade")(R)
             extrap = ps.extrapolation.get_method("semilagrangian")
-            steps = max(1, int(round(lead_min/5)))
-            Rf = extrap(R[-12:], oflow, steps)
+            steps = max(1, int(round(lead_min / 5)))
+            Rf = extrap(R[-12:], oflow, steps)  # use last hour (12 x 5-min)
 
-            j, i = berlin_point_index(rx, cfg["location"]["lat"], cfg["location"]["lon"])
-            rain10 = float(Rf[steps-1, j, i])
+            # 2) Probe Berlin
+            j, i = berlin_point_index(rx, lat, lon)
+            rain_future = float(Rf[steps - 1, j, i])
 
+            # 3) Cooldown gating
             now = datetime.utcnow()
-            from datetime import timezone
-            last = datetime.fromisoformat(state["last_alert_ts"].replace("Z","+00:00"))
-            if rain10 >= thr and (now - last) > timedelta(minutes=cooldown):
-                title = "Rain in ~{} minutes (Berlin)".format(lead_min)
-                msg = f"Forecast rain rate ≥ {thr} mm/h. Prepare couriers & ETAs."
+            last = datetime.fromisoformat(state["last_alert_ts"].replace("Z", "+00:00"))
+            cooled_down = (now - last) > timedelta(minutes=cooldown)
+
+            if rain_future >= thr and cooled_down:
+                title = f"Rain in ~{lead_min} minutes (Berlin)"
+                msg = f"Forecast rain rate ≥ {thr:.2f} mm/h. Prepare couriers & ETAs."
                 if use_popup:
                     desktop_notify(title, msg)
                 slack_notify(slack_url, title, msg)
-                state["last_alert_ts"] = now.isoformat()+"Z"
-                with open(STATE_FILE,"w") as f:
-                    json.dump(state,f)
+
+                state["last_alert_ts"] = now.isoformat() + "Z"
+                try:
+                    with open(STATE_FILE, "w") as f:
+                        json.dump(state, f)
+                except Exception:
+                    pass
+
         except Exception as e:
             print("Alert loop error:", e)
-        time.sleep(int(a.get("check_interval_sec",180)))
+
+        time.sleep(check_interval)
+
 
 if __name__ == "__main__":
     main_loop()
