@@ -13,7 +13,6 @@ requests
 python-dateutil
 
 # Download helpers
-herbie>=2024.5.0,<2025.0.0      # GEFS/GFS downloader (AWS/NOMADS)
 s3fs
 fsspec
 
