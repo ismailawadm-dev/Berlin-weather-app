@@ -21,9 +21,19 @@ from wetterdienst.provider.dwd.radar import (
     DwdRadarParameter,
     DwdRadarDataSubset,
 )
-from wetterdienst import Period
+# Newer API sometimes exposes a dedicated period enum:
+try:
+    from wetterdienst.provider.dwd.radar import DwdRadarPeriod  # may exist
+except Exception:
+    DwdRadarPeriod = None
 
-# Prefer src.config.Cfg; fall back to local config.py (keeps same behavior as streamlit_app)
+# Older API exposes Period in top-level package:
+try:
+    from wetterdienst import Period  # may exist
+except Exception:
+    Period = None
+
+# Prefer src.config.Cfg; fallback to local config.py
 try:
     from src.config import Cfg
 except ModuleNotFoundError:
@@ -39,49 +49,55 @@ def _enum_member(enum_cls, names_in_priority):
     return None
 
 
-def _resolve_reflectivity_param() -> DwdRadarParameter:
+def _resolve_reflectivity_param():
     """
-    Pick a reflectivity parameter valid for this wetterdienst version.
-    Prefer RX (composite reflectivity), then other known names.
+    Pick a reflectivity-like parameter valid for this wetterdienst version.
+    Prefer RX (composite reflectivity), then others containing REFLECT.
     """
-    preferred = ["RX", "REFLECTIVITY", "COMPOSITE_REFLECTIVITY", "RADAR_REFLECTIVITY"]
-    param = _enum_member(DwdRadarParameter, preferred)
-    if param is not None:
-        return param
-
+    pref = ["RX", "REFLECTIVITY", "COMPOSITE_REFLECTIVITY", "RADAR_REFLECTIVITY", "HG_REFLECTIVITY"]
+    m = _enum_member(DwdRadarParameter, pref)
+    if m:
+        return m
     # Fallback: any member containing "REFLECT"
     for name, member in DwdRadarParameter.__members__.items():
         if "REFLECT" in name:
             return member
-
-    raise RuntimeError(
-        "No reflectivity-like parameter found in DwdRadarParameter. "
-        f"Available: {list(DwdRadarParameter.__members__.keys())}"
-    )
-
-
-def _resolve_period_5min():
-    """
-    Return a 5-minute period value accepted by this version.
-    Some versions use Period.MINUTE_5; others accept the string 'minute_5'.
-    """
-    members = getattr(Period, "__members__", {})
-    if "MINUTE_5" in members:
-        return members["MINUTE_5"]
-    return "minute_5"  # string fallback accepted by many versions
+    # Absolute last resort: first enum member
+    return list(DwdRadarParameter.__members__.values())[0]
 
 
 def _resolve_subset():
     """
-    Return a national/composite subset if present; otherwise be liberal:
-    accept SIMPLE or POLARIMETRIC if that is what this version exposes.
-    If nothing looks right, return None and we'll try constructing without subset.
+    Choose a subset that exists in this build.
+    Some versions only expose SIMPLE / POLARIMETRIC; accept those too.
     """
-    members = getattr(DwdRadarDataSubset, "__members__", {})
-    for name in ["GERMANY", "NATIONAL", "COMPOSITE", "SIMPLE", "POLARIMETRIC"]:
-        if name in members:
-            return members[name]
-    return None  # we'll try without subset entirely
+    return _enum_member(DwdRadarDataSubset, ["GERMANY", "NATIONAL", "COMPOSITE", "SIMPLE", "POLARIMETRIC"])
+
+
+def _resolve_period_5min():
+    """
+    Return a 5-minute period enum if available (new or old API).
+    If none can be found, return None so we can try calling without a period.
+    """
+    # Newer API enum?
+    if DwdRadarPeriod is not None:
+        pref = ["MINUTE_5", "MIN_5", "FIVE_MINUTES", "PT5M", "P5M"]
+        m = _enum_member(DwdRadarPeriod, pref)
+        if m:
+            return m
+        # Heuristic: any member name containing both "MIN" and "5"
+        for name, member in DwdRadarPeriod.__members__.items():
+            if "MIN" in name and "5" in name:
+                return member
+
+    # Older API enum?
+    if Period is not None:
+        m = _enum_member(Period, ["MINUTE_5", "MIN_5", "FIVE_MINUTES"])
+        if m:
+            return m
+
+    # Nothing definite
+    return None
 
 
 def fetch_radar_last_hour():
@@ -93,20 +109,20 @@ def fetch_radar_last_hour():
     start = end - timedelta(minutes=60)
 
     param = _resolve_reflectivity_param()
-    period_5 = _resolve_period_5min()
     subset = _resolve_subset()
+    period5 = _resolve_period_5min()
 
-    # Try with subset (if we found one), then without subset.
+    # Try combinations from most specific to least; some versions reject
+    # unknown/irrelevant kwargs, so we also try without them.
+    base = dict(parameter=param, start_date=start, end_date=end)
     attempts = []
-    base_kwargs = dict(
-        parameter=param,
-        start_date=start,
-        end_date=end,
-        period=period_5,
-    )
+    if subset is not None and period5 is not None:
+        attempts.append({**base, "subset": subset, "period": period5})
     if subset is not None:
-        attempts.append({**base_kwargs, "subset": subset})
-    attempts.append(base_kwargs)  # try without subset too
+        attempts.append({**base, "subset": subset})
+    if period5 is not None:
+        attempts.append({**base, "period": period5})
+    attempts.append(base)  # bare-minimum call
 
     last_err = None
     for kwargs in attempts:
@@ -119,19 +135,19 @@ def fetch_radar_last_hour():
             last_err = e
             continue
 
-    # If we get here, all attempts failed; surface a helpful error
     raise RuntimeError(
         "Could not fetch DWD radar reflectivity; "
-        f"last error was: {last_err!r}; "
+        f"last error={last_err!r}; "
         f"param={getattr(param,'name',param)!r}, "
-        f"subset_tried={getattr(subset,'name',subset)!r}, "
-        f"period={getattr(period_5,'name',period_5)!r}, "
-        f"available_subsets={list(getattr(DwdRadarDataSubset,'__members__',{}).keys())}"
+        f"subset={getattr(subset,'name',subset)!r}, "
+        f"period={getattr(period5,'name',period5)!r}, "
+        f"available_periods="
+        f"{list(getattr(DwdRadarPeriod,'__members__',{}).keys()) or list(getattr(Period,'__members__',{}).keys())}"
     )
 
 
 def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
-    """Marshall–Palmer: Z=200*R^1.6  ->  R=(Z/200)^(1/1.6). Z in dBZ."""
+    """Marshall–Palmer: Z = 200 * R^1.6  =>  R = (Z/200)^(1/1.6). Z in dBZ."""
     Z_lin = 10.0 ** (Z / 10.0)
     R = (Z_lin / 200.0) ** (1.0 / 1.6)
     R[np.isnan(R)] = 0.0
