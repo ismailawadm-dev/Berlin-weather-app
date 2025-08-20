@@ -9,6 +9,8 @@ numpy
 scipy
 joblib
 pyyaml
+herbie
+cfgrib
 requests
 python-dateutil
 wetterdienst==0.111.0
