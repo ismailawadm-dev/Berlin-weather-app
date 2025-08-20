@@ -3,3 +3,5 @@ libeccodes-dev
 proj-bin
 libproj-dev
 libgeos-dev
+libeccodes0
+libeccodes-dev
