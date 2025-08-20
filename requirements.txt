@@ -11,7 +11,10 @@ joblib
 pyyaml
 requests
 python-dateutil
-
+wetterdienst==0.111.0
+wradlib>=1.19
+h5py
+netCDF4
 # Download helpers
 s3fs
 fsspec
