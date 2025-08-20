@@ -2,7 +2,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import xarray as xr
-from ..utils.timealign import to_3h_bins
+from utils.timealign import to_3h_bins
 
 def summarize_ensemble(ds: xr.Dataset, lat, lon) -> pd.DataFrame:
     point = ds.sel(latitude=lat, longitude=lon, method="nearest")
