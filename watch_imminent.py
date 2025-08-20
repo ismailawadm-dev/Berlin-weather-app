@@ -21,10 +21,7 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pysteps as ps
-from wetterdienst.provider.dwd.radar import (
-    DwdRadarValues,
-    DwdRadarParameter,
-)
+from wetterdienst.provider.dwd.radar import DwdRadarValues  # <-- no enum import
 from wetterdienst import Period
 
 # Prefer src.config.Cfg if a src/ layout exists; otherwise use local config.py
@@ -37,11 +34,9 @@ STATE_FILE = ".alert_state.json"
 
 
 def desktop_notify(title: str, message: str) -> None:
-    """Best-effort desktop popup (macOS/Linux)."""
     os_name = platform.system()
     try:
         if os_name == "Darwin":
-            # macOS Notification Center
             subprocess.run(
                 ["osascript", "-e", f'display notification "{message}" with title "{title}"'],
                 check=False,
@@ -49,50 +44,53 @@ def desktop_notify(title: str, message: str) -> None:
         elif os_name == "Linux":
             subprocess.run(["notify-send", title, message], check=False)
     except Exception:
-        pass  # non-fatal
+        pass  # best-effort
 
 
 def slack_notify(webhook_url: str | None, title: str, message: str) -> None:
-    """Send a simple Slack message via incoming webhook (optional)."""
     if not webhook_url:
         return
     try:
         import requests
         requests.post(webhook_url, json={"text": f"*{title}*\n{message}"}, timeout=5)
     except Exception:
-        pass  # non-fatal
+        pass  # best-effort
 
 
 def _first_var_name(ds):
-    """Return the first data variable name from an xarray Dataset."""
     return next(iter(ds.data_vars))
 
 
 def fetch_radar_last_hour():
     """
-    Fetch the last hour of DWD RX reflectivity at 5-minute steps as an
-    xarray DataArray with dims [time, y, x], values in dBZ.
+    Fetch last hour of DWD composite reflectivity (5-min) as DataArray [time,y,x] in dBZ.
 
-    NOTE: We do NOT pass a 'subset' argument to avoid enum differences
-    across wetterdienst versions. The default covers Germany.
+    We avoid the enum and try multiple parameter spellings to be compatible across
+    wetterdienst versions.
     """
     end = datetime.utcnow().replace(second=0, microsecond=0)
     start = end - timedelta(minutes=60)
 
-    values = DwdRadarValues(
-        parameter=DwdRadarParameter.RX,
-        start_date=start,
-        end_date=end,
-        period=Period.MINUTE_5,
-    )
-    ds = values.to_xarray()  # Dataset, variable name can vary
-    var = "value" if "value" in ds.variables else _first_var_name(ds)
-    da = ds[var].transpose("time", "y", "x").astype(float)
-    return da
+    last_err = None
+    for param in ("rx", "RX", "reflectivity", "RADAR_REFLECTIVITY"):
+        try:
+            values = DwdRadarValues(
+                parameter=param,         # <-- string instead of enum
+                start_date=start,
+                end_date=end,
+                period=Period.MINUTE_5,
+            )
+            ds = values.to_xarray()
+            var = "value" if "value" in ds.variables else _first_var_name(ds)
+            return ds[var].transpose("time", "y", "x").astype(float)
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(f"Could not fetch DWD radar reflectivity (last error: {last_err})")
 
 
 def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
-    """Marshall–Palmer: Z=200*R^1.6  ->  R=(Z/200)^(1/1.6). Z in dBZ."""
     Z_lin = 10.0 ** (Z / 10.0)
     R = (Z_lin / 200.0) ** (1.0 / 1.6)
     R[np.isnan(R)] = 0.0
@@ -100,7 +98,6 @@ def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
 
 
 def berlin_point_index(da, lat: float, lon: float) -> tuple[int, int]:
-    """Find nearest grid index to (lat,lon). If coords missing, use grid center."""
     if hasattr(da, "coords") and "latitude" in da.coords and "longitude" in da.coords:
         j = int(np.abs(np.asarray(da.coords["latitude"].values) - lat).argmin())
         i = int(np.abs(np.asarray(da.coords["longitude"].values) - lon).argmin())
@@ -127,7 +124,6 @@ def main_loop() -> None:
     use_popup = a.get("channels", {}).get("desktop_notify", True)
     check_interval = int(a.get("check_interval_sec", 180))
 
-    # cooldown state
     try:
         with open(STATE_FILE, "r") as f:
             state = json.load(f)
@@ -136,20 +132,17 @@ def main_loop() -> None:
 
     while True:
         try:
-            # 1) fetch & nowcast
-            rx = fetch_radar_last_hour()           # DataArray [time,y,x] in dBZ
-            R = reflectivity_to_rainrate(rx.values)  # mm/h
+            rx = fetch_radar_last_hour()
+            R = reflectivity_to_rainrate(rx.values)
 
             oflow = ps.motion.get_method("lucaskanade")(R)
             extrap = ps.extrapolation.get_method("semilagrangian")
             steps = max(1, int(round(lead_min / 5)))
-            Rf = extrap(R[-12:], oflow, steps)     # last hour -> next steps
+            Rf = extrap(R[-12:], oflow, steps)
 
-            # 2) probe Berlin
             j, i = berlin_point_index(rx, lat, lon)
             rain_future = float(Rf[steps - 1, j, i])
 
-            # 3) cooldown gating + notify
             now = datetime.utcnow()
             last = datetime.fromisoformat(state["last_alert_ts"].replace("Z", "+00:00"))
             cooled_down = (now - last) > timedelta(minutes=cooldown)
