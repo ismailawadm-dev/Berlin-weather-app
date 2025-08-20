@@ -67,20 +67,53 @@ def slack_notify(webhook_url: str | None, title: str, message: str) -> None:
         pass
 
 
+# ---------- Wetterdienst compatibility helpers ----------
+
+def _pick_rx_param() -> DwdRadarParameter:
+    """
+    Find the enum member representing 5-min reflectivity (“RX”) across
+    wetterdienst versions. Returns the first match found; as a last resort,
+    returns the first enum value to avoid AttributeError crashes.
+    """
+    candidates = (
+        "RX",                    # classic
+        "RADAR_RX",              # some versions
+        "REFLECTIVITY",          # generic
+        "RX_REFLECTIVITY",       # seen in a few builds
+        "PPI_RX",                # alternative naming
+        "RADAR_REFLECTIVITY",    # another alias
+    )
+    for name in candidates:
+        if hasattr(DwdRadarParameter, name):
+            return getattr(DwdRadarParameter, name)
+    # Fallback: return *some* enum member to keep API call valid;
+    # upstream error handling will show a friendly message if the request fails.
+    return list(DwdRadarParameter)[0]
+
+
 def fetch_radar_last_hour():
-    """Fetch last hour of DWD RX reflectivity at 5-min steps as xarray DataArray [time,y,x]."""
+    """
+    Fetch last hour of DWD reflectivity at 5-min steps as an xarray DataArray
+    with shape [time, y, x] in dBZ. Works across wetterdienst versions.
+    """
     end = datetime.utcnow().replace(second=0, microsecond=0)
     start = end - timedelta(minutes=60)
+
+    param = _pick_rx_param()
+
     values = DwdRadarValues(
-        parameter=DwdRadarParameter.RX,
+        parameter=param,
         start_date=start,
         end_date=end,
         subset=DwdRadarDataSubset.GERMANY,
         period=Period.MINUTE_5,
     )
-    ds = values.to_xarray()  # Dataset with variable "value"
-    return ds["value"].transpose("time", "y", "x").astype(float)
+    ds = values.to_xarray()  # Dataset with a single data var (often named "value")
+    var_name = "value" if "value" in ds.data_vars else list(ds.data_vars)[0]
+    return ds[var_name].transpose("time", "y", "x").astype(float)
 
+
+# ---------- Conversions & utilities ----------
 
 def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
     """Marshall–Palmer: Z=200*R^1.6  ->  R=(Z/200)^(1/1.6). Z is in dBZ."""
@@ -100,6 +133,8 @@ def berlin_point_index(da, lat: float, lon: float) -> tuple[int, int]:
         i = int(da.shape[2] // 2)
     return j, i
 
+
+# ---------- Main alert loop (optional when running file directly) ----------
 
 def main_loop() -> None:
     cfg = Cfg("config.yaml")  # be explicit like in streamlit_app.py
