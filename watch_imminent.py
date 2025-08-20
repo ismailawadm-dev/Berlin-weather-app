@@ -23,7 +23,7 @@ from wetterdienst.provider.dwd.radar import (
 )
 from wetterdienst import Period
 
-# Prefer src.config.Cfg; fall back to local config.py
+# Prefer src.config.Cfg; fall back to local config.py (keeps same behavior as streamlit_app)
 try:
     from src.config import Cfg
 except ModuleNotFoundError:
@@ -42,11 +42,10 @@ def _enum_member(enum_cls, names_in_priority):
 def _resolve_reflectivity_param() -> DwdRadarParameter:
     """
     Pick a reflectivity parameter valid for this wetterdienst version.
-    We prefer RX (composite reflectivity), then other known names.
+    Prefer RX (composite reflectivity), then other known names.
     """
-    # Prefer RX first to avoid invalid names on older versions
-    pref = ["RX", "REFLECTIVITY", "COMPOSITE_REFLECTIVITY", "RADAR_REFLECTIVITY"]
-    param = _enum_member(DwdRadarParameter, pref)
+    preferred = ["RX", "REFLECTIVITY", "COMPOSITE_REFLECTIVITY", "RADAR_REFLECTIVITY"]
+    param = _enum_member(DwdRadarParameter, preferred)
     if param is not None:
         return param
 
@@ -56,7 +55,7 @@ def _resolve_reflectivity_param() -> DwdRadarParameter:
             return member
 
     raise RuntimeError(
-        "Could not find a reflectivity parameter in DwdRadarParameter. "
+        "No reflectivity-like parameter found in DwdRadarParameter. "
         f"Available: {list(DwdRadarParameter.__members__.keys())}"
     )
 
@@ -64,27 +63,25 @@ def _resolve_reflectivity_param() -> DwdRadarParameter:
 def _resolve_period_5min():
     """
     Return a 5-minute period value accepted by this version.
-    Some versions use Period.MINUTE_5; others accept 'minute_5' (string).
+    Some versions use Period.MINUTE_5; others accept the string 'minute_5'.
     """
     members = getattr(Period, "__members__", {})
     if "MINUTE_5" in members:
         return members["MINUTE_5"]
-    return "minute_5"
+    return "minute_5"  # string fallback accepted by many versions
 
 
-def _resolve_subset_germany():
+def _resolve_subset():
     """
-    Return a national composite subset accepted by this version.
-    Names vary across versions.
+    Return a national/composite subset if present; otherwise be liberal:
+    accept SIMPLE or POLARIMETRIC if that is what this version exposes.
+    If nothing looks right, return None and we'll try constructing without subset.
     """
-    pref = ["GERMANY", "NATIONAL", "COMPOSITE"]
-    subset = _enum_member(DwdRadarDataSubset, pref)
-    if subset is not None:
-        return subset
-    raise RuntimeError(
-        "Could not resolve a national composite subset. "
-        f"Available: {list(DwdRadarDataSubset.__members__.keys())}"
-    )
+    members = getattr(DwdRadarDataSubset, "__members__", {})
+    for name in ["GERMANY", "NATIONAL", "COMPOSITE", "SIMPLE", "POLARIMETRIC"]:
+        if name in members:
+            return members[name]
+    return None  # we'll try without subset entirely
 
 
 def fetch_radar_last_hour():
@@ -96,20 +93,41 @@ def fetch_radar_last_hour():
     start = end - timedelta(minutes=60)
 
     param = _resolve_reflectivity_param()
-    subset = _resolve_subset_germany()
     period_5 = _resolve_period_5min()
+    subset = _resolve_subset()
 
-    values = DwdRadarValues(
-        parameter=param,     # enum, not string
+    # Try with subset (if we found one), then without subset.
+    attempts = []
+    base_kwargs = dict(
+        parameter=param,
         start_date=start,
         end_date=end,
-        subset=subset,       # enum
-        period=period_5,     # enum or 'minute_5' string (both supported)
+        period=period_5,
     )
+    if subset is not None:
+        attempts.append({**base_kwargs, "subset": subset})
+    attempts.append(base_kwargs)  # try without subset too
 
-    ds = values.to_xarray()         # Dataset with variable "value"
-    da = ds["value"].transpose("time", "y", "x").astype(float)
-    return da
+    last_err = None
+    for kwargs in attempts:
+        try:
+            values = DwdRadarValues(**kwargs)
+            ds = values.to_xarray()  # Dataset with variable "value"
+            da = ds["value"].transpose("time", "y", "x").astype(float)
+            return da
+        except Exception as e:
+            last_err = e
+            continue
+
+    # If we get here, all attempts failed; surface a helpful error
+    raise RuntimeError(
+        "Could not fetch DWD radar reflectivity; "
+        f"last error was: {last_err!r}; "
+        f"param={getattr(param,'name',param)!r}, "
+        f"subset_tried={getattr(subset,'name',subset)!r}, "
+        f"period={getattr(period_5,'name',period_5)!r}, "
+        f"available_subsets={list(getattr(DwdRadarDataSubset,'__members__',{}).keys())}"
+    )
 
 
 def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
