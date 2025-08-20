@@ -1,7 +1,7 @@
 # watch_imminent.py
 from __future__ import annotations
 
-# -------- path bootstrap (works when run directly or via Streamlit) ----------
+# ---- path bootstrap (works when run directly or via Streamlit) --------------
 import sys
 from pathlib import Path
 
@@ -21,9 +21,8 @@ from datetime import datetime, timedelta
 
 import numpy as np
 import pysteps as ps
-from wetterdienst.provider.dwd.radar import DwdRadarValues  # <-- no enums imported
+from wetterdienst.provider.dwd.radar import DwdRadarValues  # keep it minimal
 
-# Prefer src.config.Cfg if a src/ layout exists; otherwise use local config.py
 try:
     from src.config import Cfg
 except ModuleNotFoundError:
@@ -60,59 +59,96 @@ def _first_var_name(ds):
     return next(iter(ds.data_vars))
 
 
-def fetch_radar_last_hour(debug: bool = False):
+def _try_make_values(kwargs):
+    """
+    Helper: build DwdRadarValues with kwargs; ignore unknown kwargs (TypeError).
+    Return xarray Dataset if ok, else None.
+    """
+    try:
+        v = DwdRadarValues(**kwargs)
+        return v.to_xarray()
+    except TypeError:
+        return None
+    except Exception as e:
+        raise e
+
+
+def fetch_radar_last_hour():
     """
     Fetch last hour of DWD composite reflectivity (5-min) as DataArray [time,y,x] in dBZ.
 
-    We avoid fragile enums and try a few parameter/subset/time_resolution spellings
-    that differ across wetterdienst versions.
+    We avoid fragile Enum imports and try several keyword/argument variants that
+    changed across wetterdienst versions.
     """
     end = datetime.utcnow().replace(second=0, microsecond=0)
     start = end - timedelta(minutes=60)
 
-    param_opts = ("rx", "reflectivity", "RADAR_REFLECTIVITY")
-    subset_opts = ("germany", "composite", None)          # some versions prefer "germany"
-    tres_opts   = ("minute_5", "minute5", "5_minutes", "5min", None)  # time_resolution
-    period_opts = ("recent", "latest", "historical", None)
+    # Parameter name conventions across versions
+    param_variants = (
+        {"parameter": "rx"},
+        {"parameter": "RX"},
+        {"parameter": "reflectivity"},
+        {"parameter": "RADAR_REFLECTIVITY"},
+        # older signatures where 'composite' is the parameter and 'product' selects rx
+        {"parameter": "composite", "product": "rx"},
+    )
+
+    # Composite grid naming
+    subset_variants = (
+        {"subset": "germany"},
+        {"subset": "composite"},
+        {"site": "germany"},  # some versions use 'site' instead of 'subset'
+        {},
+    )
+
+    # Time keys and resolution spelling
+    timekey_variants = (
+        {"start_date": start, "end_date": end},
+        {"start_time": start, "end_time": end},
+    )
+    tres_variants = (
+        {"time_resolution": "minute_5"},
+        {"time_resolution": "minute5"},
+        {"time_resolution": "5_minutes"},
+        {"time_resolution": "5min"},
+        {},  # some versions infer it
+    )
+    period_variants = (
+        {"period": "recent"},
+        {"period": "latest"},
+        {"period": "historical"},
+        {},  # no period
+    )
 
     last_err = None
-    for param in param_opts:
-        for subset in subset_opts:
-            for tres in tres_opts:
-                for period in period_opts:
-                    try:
-                        kwargs = {
-                            "parameter": param,
-                            "start_date": start,
-                            "end_date": end,
-                        }
-                        if subset is not None:
-                            kwargs["subset"] = subset
-                        if tres is not None:
-                            kwargs["time_resolution"] = tres
-                        if period is not None:
-                            kwargs["period"] = period
 
-                        values = DwdRadarValues(**kwargs)
-                        ds = values.to_xarray()
-
-                        var = "value" if "value" in ds.variables else _first_var_name(ds)
-                        da = ds[var].transpose("time", "y", "x").astype(float)
-
-                        if debug:
-                            print(f"[watch_imminent] OK with "
-                                  f"parameter={param}, subset={subset}, "
-                                  f"time_resolution={tres}, period={period}")
-                        return da
-                    except Exception as e:
-                        last_err = e
-                        continue
+    for p in param_variants:
+        for s in subset_variants:
+            for t in timekey_variants:
+                for tr in tres_variants:
+                    for per in period_variants:
+                        kwargs = {}
+                        kwargs.update(p)
+                        kwargs.update(s)
+                        kwargs.update(t)
+                        kwargs.update(tr)
+                        kwargs.update(per)
+                        try:
+                            ds = _try_make_values(kwargs)
+                            if ds is None:
+                                continue
+                            var = "value" if "value" in ds.variables else _first_var_name(ds)
+                            da = ds[var].transpose("time", "y", "x").astype(float)
+                            return da
+                        except Exception as e:
+                            last_err = e
+                            continue
 
     raise RuntimeError(f"Could not fetch DWD radar reflectivity; last error was: {last_err!r}")
 
 
 def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
-    # Marshall–Palmer: Z=200*R^1.6  ->  R=(Z/200)^(1/1.6). Z is in dBZ.
+    # Marshall–Palmer: Z=200*R^1.6  ->  R=(Z/200)^(1/1.6). Z in dBZ.
     Z_lin = 10.0 ** (Z / 10.0)
     R = (Z_lin / 200.0) ** (1.0 / 1.6)
     R[np.isnan(R)] = 0.0
@@ -165,6 +201,7 @@ def main_loop() -> None:
             j, i = berlin_point_index(rx, lat, lon)
             rain_future = float(Rf[steps - 1, j, i])
 
+            from datetime import datetime, timedelta
             now = datetime.utcnow()
             last = datetime.fromisoformat(state["last_alert_ts"].replace("Z", "+00:00"))
             cooled_down = (now - last) > timedelta(minutes=cooldown)
