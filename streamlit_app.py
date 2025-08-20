@@ -1,10 +1,13 @@
 import datetime as dt
 import pandas as pd
 import streamlit as st
-from src.config import Cfg
-from src.data_sources.gefs import GEFSDownloader
-from src.features.make_features import summarize_ensemble
-from src.modeling.prob_model import ProbModel
+from config import Cfg
+try:
+    from gefs import GEFSDownloader
+except Exception:
+    GEFSDownloader = None  # herbie isn't installed on Cloud; keep GEFS optional
+from make_features import summarize_ensemble
+from prob_model import ProbModel
 from src.modeling.quant_model import QuantileModel
 from src.modeling.calib import Calibrator
 from src.alerts.watch_imminent import fetch_radar_last_hour, reflectivity_to_rainrate, berlin_point_index
