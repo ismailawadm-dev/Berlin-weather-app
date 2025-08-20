@@ -1,0 +1,50 @@
+name: Build & publish forecast
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # every 6 hours
+  workflow_dispatch:
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # allow committing generated files
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: System libs for cfgrib/eccodes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libeccodes0 libeccodes-dev
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements.txt
+          # Add runtime-only extras for the CI job (not needed on Streamlit Cloud)
+          pip install herbie cfgrib
+
+      - name: Generate forecast files
+        run: python scripts/make_daily_forecast.py
+
+      - name: Commit forecast artifacts
+        run: |
+          if [ -n "$(git status --porcelain data)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/
+            git commit -m "auto: update forecast data"
+            git push
+          else
+            echo "No changes to commit."
+          fi
