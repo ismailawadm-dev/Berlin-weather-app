@@ -35,19 +35,11 @@ try:
     from src.modeling.calib import Calibrator
 except ModuleNotFoundError:
     from calib import Calibrator
-# --- alerts imports (works whether file is at repo root or in src/alerts) ---
+# --- alerts imports (robust fallback) ---
 try:
-    from src.alerts.watch_imminent import (
-        fetch_radar_last_hour,
-        reflectivity_to_rainrate,
-        berlin_point_index,
-    )
-except ModuleNotFoundError:
-    from watch_imminent import (
-        fetch_radar_last_hour,
-        reflectivity_to_rainrate,
-        berlin_point_index,
-    )
+    from src.alerts.watch_imminent import fetch_radar_last_hour, reflectivity_to_rainrate, berlin_point_index
+except Exception:
+    from watch_imminent import fetch_radar_last_hour, reflectivity_to_rainrate, berlin_point_index
 # --- end alerts imports ---
 import numpy as np
 
