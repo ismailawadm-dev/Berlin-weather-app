@@ -1,0 +1,33 @@
+# Core data + GRIB/NetCDF
+xarray>=2024.6.0
+cfgrib>=0.9.14.1
+eccodes>=2.33.0
+zarr
+numcodecs
+pandas
+numpy
+scipy
+joblib
+pyyaml
+requests
+python-dateutil
+
+# Download helpers
+herbie>=2024.5.0       # GEFS/GFS downloader (AWS/NOMADS)
+s3fs
+fsspec
+
+# Modeling
+scikit-learn
+lightgbm
+xgboost
+
+# Nowcasting (optional)
+pysteps
+wetterdienst>=0.80.0   # DWD RADOLAN/RX access
+rasterio
+pyproj
+
+# Web app
+streamlit>=1.33
+plotly>=5.20

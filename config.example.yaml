@@ -1,0 +1,49 @@
+location:
+  name: Berlin
+  lat: 52.52
+  lon: 13.405
+  bbox: [11.0, 51.0, 15.5, 54.0]
+
+paths:
+  cache: data/cache
+  models: models
+  logs: logs
+
+training:
+  rain_threshold_mm: 0.1
+  window_hours: 3
+  min_history_days: 365
+  use_quantiles: true
+
+features:
+  variables: ["APCP", "PWAT", "CAPE", "RH:700 mb", "HGT:500 mb", "UGRD:850 mb", "VGRD:850 mb", "TMP:2 m above ground"]
+  leads_hours: [6,9,12,15,18,21,24,27,30,33,36,42,48,54,60,72,96,120,144,168,192,216,240,288,336]
+  members: ["gec00","gep01","gep02","gep03","gep04","gep05","gep06","gep07","gep08","gep09","gep10","gep11","gep12","gep13","gep14","gep15","gep16","gep17","gep18","gep19","gep20","gep21","gep22","gep23","gep24","gep25","gep26","gep27","gep28","gep29","gep30"]
+
+models:
+  prob:
+    type: lightgbm
+    params:
+      n_estimators: 400
+      learning_rate: 0.05
+      subsample: 0.8
+      colsample_bytree: 0.8
+  quant:
+    type: lightgbm
+    quantiles: [0.5, 0.75, 0.9]
+    params:
+      n_estimators: 500
+      learning_rate: 0.05
+
+calibration:
+  method: isotonic
+
+alerts:
+  enabled: false
+  check_interval_sec: 180
+  lead_minutes: 10
+  rainrate_threshold_mmph: 0.6
+  cooldown_minutes: 45
+  channels:
+    desktop_notify: false
+    slack_webhook: ""
