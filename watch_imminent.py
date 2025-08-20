@@ -1,7 +1,7 @@
 # watch_imminent.py
 from __future__ import annotations
 
-# --- path bootstrap: allows both flat and src/ layouts ---
+# --- path bootstrap (works for both src/ and flat layouts) ---
 import sys
 from pathlib import Path
 
@@ -30,57 +30,60 @@ except ModuleNotFoundError:
     from config import Cfg
 
 
+def _enum_member(enum_cls, names_in_priority):
+    """Return the first enum member (not string) whose name matches any in names_in_priority."""
+    members = getattr(enum_cls, "__members__", {})
+    for name in names_in_priority:
+        if name in members:
+            return members[name]
+    return None
+
+
 def _resolve_reflectivity_param() -> DwdRadarParameter:
     """
-    Find a reflectivity parameter that exists in this wetterdienst version.
-    Tries a list of known names, then falls back to the first enum containing 'REFLECT'.
+    Pick a reflectivity parameter valid for this wetterdienst version.
+    We prefer RX (composite reflectivity), then other known names.
     """
-    candidates = [
-        "RADAR_REFLECTIVITY",  # newer names in some versions
-        "COMPOSITE_REFLECTIVITY",
-        "REFLECTIVITY",
-        "RX",                  # classic composite reflectivity
-    ]
-    for name in candidates:
-        param = getattr(DwdRadarParameter, name, None)
-        if param is not None:
-            return param
+    # Prefer RX first to avoid invalid names on older versions
+    pref = ["RX", "REFLECTIVITY", "COMPOSITE_REFLECTIVITY", "RADAR_REFLECTIVITY"]
+    param = _enum_member(DwdRadarParameter, pref)
+    if param is not None:
+        return param
 
-    # Fallback: pick first enum whose name contains REFLECT
-    for p in DwdRadarParameter:
-        if "REFLECT" in p.name:
-            return p
-
-    # As a last resort, try RX if present at all
-    if hasattr(DwdRadarParameter, "RX"):
-        return DwdRadarParameter.RX
+    # Fallback: any member containing "REFLECT"
+    for name, member in DwdRadarParameter.__members__.items():
+        if "REFLECT" in name:
+            return member
 
     raise RuntimeError(
-        f"Could not find a reflectivity parameter in DwdRadarParameter. "
-        f"Available: {[p.name for p in DwdRadarParameter]}"
+        "Could not find a reflectivity parameter in DwdRadarParameter. "
+        f"Available: {list(DwdRadarParameter.__members__.keys())}"
     )
 
 
 def _resolve_period_5min():
     """
-    Return a 5-minute period/time resolution value that this wetterdienst version accepts.
-    Many versions accept the enum Period.MINUTE_5; others accept the string 'minute_5'.
+    Return a 5-minute period value accepted by this version.
+    Some versions use Period.MINUTE_5; others accept 'minute_5' (string).
     """
-    return getattr(Period, "MINUTE_5", "minute_5")
+    members = getattr(Period, "__members__", {})
+    if "MINUTE_5" in members:
+        return members["MINUTE_5"]
+    return "minute_5"
 
 
 def _resolve_subset_germany():
     """
-    Return a national composite subset/dataset enum that exists in this version.
+    Return a national composite subset accepted by this version.
+    Names vary across versions.
     """
-    for name in ("GERMANY", "NATIONAL", "COMPOSITE"):
-        s = getattr(DwdRadarDataSubset, name, None)
-        if s is not None:
-            return s
-    # If nothing matches, just raise with helpful info
+    pref = ["GERMANY", "NATIONAL", "COMPOSITE"]
+    subset = _enum_member(DwdRadarDataSubset, pref)
+    if subset is not None:
+        return subset
     raise RuntimeError(
-        f"Could not resolve a national composite subset. "
-        f"Available: {[s.name for s in DwdRadarDataSubset]}"
+        "Could not resolve a national composite subset. "
+        f"Available: {list(DwdRadarDataSubset.__members__.keys())}"
     )
 
 
@@ -96,23 +99,21 @@ def fetch_radar_last_hour():
     subset = _resolve_subset_germany()
     period_5 = _resolve_period_5min()
 
-    # Some wetterdienst versions take (start_date/end_date, subset, period),
-    # others accept strings for period. This call covers both.
     values = DwdRadarValues(
-        parameter=param,
+        parameter=param,     # enum, not string
         start_date=start,
         end_date=end,
-        subset=subset,
-        period=period_5,
+        subset=subset,       # enum
+        period=period_5,     # enum or 'minute_5' string (both supported)
     )
 
-    ds = values.to_xarray()  # Dataset with variable "value"
+    ds = values.to_xarray()         # Dataset with variable "value"
     da = ds["value"].transpose("time", "y", "x").astype(float)
     return da
 
 
 def reflectivity_to_rainrate(Z: np.ndarray) -> np.ndarray:
-    """Marshall–Palmer Z=200*R^1.6  ->  R=(Z/200)^(1/1.6). Z in dBZ."""
+    """Marshall–Palmer: Z=200*R^1.6  ->  R=(Z/200)^(1/1.6). Z in dBZ."""
     Z_lin = 10.0 ** (Z / 10.0)
     R = (Z_lin / 200.0) ** (1.0 / 1.6)
     R[np.isnan(R)] = 0.0
