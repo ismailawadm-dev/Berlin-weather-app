@@ -1,17 +1,13 @@
 # watch_imminent.py
 from __future__ import annotations
-
-# --- path bootstrap (works for both src/ and flat layouts) ---
 import sys
 from pathlib import Path
-
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
 for p in (ROOT, SRC):
     s = str(p)
     if s not in sys.path:
         sys.path.insert(0, s)
-# --- end bootstrap ---
 
 from datetime import datetime, timedelta
 import io
@@ -26,56 +22,55 @@ from wetterdienst.provider.dwd.radar import (
     DwdRadarDataSubset,
 )
 
-# Some builds have a dedicated radar period enum, others reuse top-level Period
 try:
     from wetterdienst.provider.dwd.radar import DwdRadarPeriod  # may not exist
 except Exception:
     DwdRadarPeriod = None
 
 try:
-    from wetterdienst import Period  # may not exist or may only have RECENT/HISTORICAL
+    from wetterdienst import Period  # may not exist
 except Exception:
     Period = None
 
-# Prefer src.config.Cfg; fallback to local config.py
 try:
     from src.config import Cfg
 except ModuleNotFoundError:
     from config import Cfg
 
 
-def _enum_member(enum_cls, names_in_priority: Iterable[str]):
+def _enum_member(enum_cls, names: Iterable[str]):
     members = getattr(enum_cls, "__members__", {})
-    for name in names_in_priority:
-        if name in members:
-            return members[name]
+    for n in names:
+        if n in members:
+            return members[n]
     return None
 
 
 def _resolve_reflectivity_param():
-    pref = ["RX", "COMPOSITE_REFLECTIVITY", "RADAR_REFLECTIVITY", "REFLECTIVITY", "HG_REFLECTIVITY"]
-    m = _enum_member(DwdRadarParameter, pref)
-    if m:
-        return m
-    for name, member in DwdRadarParameter.__members__.items():
-        if "REFLECT" in name:
-            return member
-    return list(DwdRadarParameter.__members__.values())[0]
+    names = list(DwdRadarParameter.__members__.keys())
+    # We strongly prefer the composite reflectivity RX
+    if "RX" in names:
+        return DwdRadarParameter["RX"]
+    # fallbacks that often exist in other builds
+    for n in ["COMPOSITE_REFLECTIVITY", "REFLECTIVITY", "RADAR_REFLECTIVITY"]:
+        if n in names:
+            return DwdRadarParameter[n]
+    # last resort: raise with a helpful message
+    raise RuntimeError(
+        f"No known reflectivity parameter found. Available: {names}"
+    )
 
 
 def _resolve_subset():
-    return _enum_member(DwdRadarDataSubset, ["GERMANY", "NATIONAL", "COMPOSITE", "SIMPLE", "POLARIMETRIC"])
+    # National composite in different builds
+    return _enum_member(DwdRadarDataSubset, ["GERMANY", "NATIONAL", "COMPOSITE", "SIMPLE"])
 
 
 def _resolve_period_5min():
     if DwdRadarPeriod is not None:
-        pref = ["MINUTE_5", "MIN_5", "FIVE_MINUTES", "PT5M", "P5M"]
-        m = _enum_member(DwdRadarPeriod, pref)
+        m = _enum_member(DwdRadarPeriod, ["MINUTE_5", "MIN_5", "FIVE_MINUTES"])
         if m:
             return m
-        for name, member in DwdRadarPeriod.__members__.items():
-            if "MIN" in name and "5" in name:
-                return member
     if Period is not None:
         m = _enum_member(Period, ["MINUTE_5", "MIN_5", "FIVE_MINUTES"])
         if m:
@@ -83,7 +78,7 @@ def _resolve_period_5min():
     return None
 
 
-def _resolve_recent_period():
+def _resolve_recent():
     if DwdRadarPeriod is not None:
         m = _enum_member(DwdRadarPeriod, ["RECENT"])
         if m:
@@ -96,7 +91,6 @@ def _resolve_recent_period():
 
 
 def _values_to_dataarray(values: DwdRadarValues) -> xr.DataArray:
-    # Fast path
     if hasattr(values, "to_xarray"):
         ds = values.to_xarray()
         da = ds["value"] if "value" in ds else next(iter(ds.data_vars.values()))
@@ -107,7 +101,6 @@ def _values_to_dataarray(values: DwdRadarValues) -> xr.DataArray:
                 da = da.transpose("time", spatial[-2], spatial[-1])
         return da.astype(float)
 
-    # Fallback: iterate query() items
     arrays = []
     for item in values.query():
         ds = None
@@ -128,14 +121,12 @@ def _values_to_dataarray(values: DwdRadarValues) -> xr.DataArray:
                 ds = None
         if ds is None:
             continue
-
         if "value" in ds:
             da_i = ds["value"]
         elif len(ds.data_vars):
             da_i = next(iter(ds.data_vars.values()))
         else:
             continue
-
         if "time" not in da_i.dims:
             da_i = da_i.expand_dims("time")
         arrays.append(da_i)
@@ -156,24 +147,25 @@ def fetch_radar_last_hour():
     end = datetime.utcnow().replace(second=0, microsecond=0)
     start = end - timedelta(minutes=60)
 
-    param = _resolve_reflectivity_param()
-    subset = _resolve_subset()
-    period5 = _resolve_period_5min()
-    period_recent = _resolve_recent_period()
+    param = _resolve_reflectivity_param()          # try RX first
+    subset = _resolve_subset()                     # national/simple/composite
+    p5    = _resolve_period_5min()                 # 5-min period if available
+    prec  = _resolve_recent()                      # RECENT period as fallback
 
     base = dict(parameter=param, start_date=start, end_date=end)
-
     attempts = []
-    if subset is not None and period5 is not None:
-        attempts.append({**base, "subset": subset, "period": period5})
-    if subset is not None and period_recent is not None:
-        attempts.append({**base, "subset": subset, "period": period_recent})
-    if subset is not None:
+
+    # Order of attempts: (subset + 5min) → (subset + RECENT) → subset only → periods → bare
+    if subset and p5:
+        attempts.append({**base, "subset": subset, "period": p5})
+    if subset and prec:
+        attempts.append({**base, "subset": subset, "period": prec})
+    if subset:
         attempts.append({**base, "subset": subset})
-    if period5 is not None:
-        attempts.append({**base, "period": period5})
-    if period_recent is not None:
-        attempts.append({**base, "period": period_recent})
+    if p5:
+        attempts.append({**base, "period": p5})
+    if prec:
+        attempts.append({**base, "period": prec})
     attempts.append(base)
 
     last_err: Optional[Exception] = None
@@ -192,12 +184,9 @@ def fetch_radar_last_hour():
     )
     raise RuntimeError(
         "Could not fetch DWD radar reflectivity; "
-        f"last error={last_err!r}; "
-        f"param={getattr(param,'name',param)!r}, "
-        f"subset={getattr(subset,'name',subset)!r}, "
-        f"period5={getattr(period5,'name',period5)!r}, "
-        f"recent={getattr(period_recent,'name',period_recent)!r}, "
-        f"available_periods={avail_periods}"
+        f"last error={last_err!r}; param={getattr(param,'name',param)!r}, "
+        f"subset={getattr(subset,'name',subset)!r}, period5={getattr(p5,'name',p5)!r}, "
+        f"recent={getattr(prec,'name',prec)!r}, available_periods={avail_periods}"
     )
 
 
