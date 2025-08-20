@@ -49,7 +49,6 @@ def desktop_notify(title: str, message: str) -> None:
         elif os_name == "Linux":
             subprocess.run(["notify-send", title, message], check=False)
     except Exception:
-        # Notifications are best-effort; ignore failures
         pass
 
 
@@ -63,52 +62,73 @@ def slack_notify(webhook_url: str | None, title: str, message: str) -> None:
     try:
         requests.post(webhook_url, json=payload, timeout=5)
     except Exception:
-        # Network errors shouldn't crash the loop
         pass
 
 
 # ---------- Wetterdienst compatibility helpers ----------
 
 def _pick_rx_param() -> DwdRadarParameter:
-    """
-    Find the enum member representing 5-min reflectivity (“RX”) across
-    wetterdienst versions. Returns the first match found; as a last resort,
-    returns the first enum value to avoid AttributeError crashes.
-    """
+    """Find an RX/reflectivity enum across wetterdienst versions."""
     candidates = (
-        "RX",                    # classic
-        "RADAR_RX",              # some versions
-        "REFLECTIVITY",          # generic
-        "RX_REFLECTIVITY",       # seen in a few builds
-        "PPI_RX",                # alternative naming
-        "RADAR_REFLECTIVITY",    # another alias
+        "RX",
+        "RADAR_RX",
+        "REFLECTIVITY",
+        "RX_REFLECTIVITY",
+        "PPI_RX",
+        "RADAR_REFLECTIVITY",
     )
     for name in candidates:
         if hasattr(DwdRadarParameter, name):
             return getattr(DwdRadarParameter, name)
-    # Fallback: return *some* enum member to keep API call valid;
-    # upstream error handling will show a friendly message if the request fails.
-    return list(DwdRadarParameter)[0]
+    return list(DwdRadarParameter)[0]  # last-resort fallback
+
+
+def _pick_subset():
+    """Find a suitable national/composite subset across versions; return None if not available."""
+    candidates = (
+        "GERMANY",
+        "NATIONAL",
+        "COMPOSITE",
+        "WHOLE",
+        "DE",
+    )
+    for name in candidates:
+        if hasattr(DwdRadarDataSubset, name):
+            return getattr(DwdRadarDataSubset, name)
+    try:
+        return list(DwdRadarDataSubset)[0]  # at least return a valid member if the enum exists
+    except Exception:
+        return None  # some versions might not require/offer subset at all
 
 
 def fetch_radar_last_hour():
     """
-    Fetch last hour of DWD reflectivity at 5-min steps as an xarray DataArray
-    with shape [time, y, x] in dBZ. Works across wetterdienst versions.
+    Fetch last hour of DWD reflectivity at 5-min steps as an xarray DataArray [time, y, x] in dBZ.
+    Works across wetterdienst versions by probing enum names.
     """
     end = datetime.utcnow().replace(second=0, microsecond=0)
     start = end - timedelta(minutes=60)
 
     param = _pick_rx_param()
+    subset = _pick_subset()
 
-    values = DwdRadarValues(
-        parameter=param,
-        start_date=start,
-        end_date=end,
-        subset=DwdRadarDataSubset.GERMANY,
-        period=Period.MINUTE_5,
-    )
-    ds = values.to_xarray()  # Dataset with a single data var (often named "value")
+    # Build kwargs depending on what's available
+    kwargs = dict(parameter=param, start_date=start, end_date=end, period=Period.MINUTE_5)
+    if subset is not None:
+        kwargs["subset"] = subset
+
+    try:
+        values = DwdRadarValues(**kwargs)
+    except TypeError:
+        # Some older versions may not accept "subset" or "period" as kwargs.
+        # Try progressively simpler signatures.
+        kwargs.pop("subset", None)
+        try:
+            values = DwdRadarValues(**kwargs)
+        except TypeError:
+            values = DwdRadarValues(parameter=param, start_date=start, end_date=end)
+
+    ds = values.to_xarray()  # Dataset with a single data var (often "value")
     var_name = "value" if "value" in ds.data_vars else list(ds.data_vars)[0]
     return ds[var_name].transpose("time", "y", "x").astype(float)
 
@@ -137,7 +157,7 @@ def berlin_point_index(da, lat: float, lon: float) -> tuple[int, int]:
 # ---------- Main alert loop (optional when running file directly) ----------
 
 def main_loop() -> None:
-    cfg = Cfg("config.yaml")  # be explicit like in streamlit_app.py
+    cfg = Cfg("config.yaml")
     a = cfg["alerts"]
 
     if not a.get("enabled", False):
@@ -162,42 +182,19 @@ def main_loop() -> None:
 
     while True:
         try:
-            # 1) Fetch & nowcast
             rx = fetch_radar_last_hour()  # DataArray [time,y,x] in dBZ
             R = reflectivity_to_rainrate(rx.values)  # mm/h
             oflow = ps.motion.get_method("lucaskanade")(R)
             extrap = ps.extrapolation.get_method("semilagrangian")
             steps = max(1, int(round(lead_min / 5)))
-            Rf = extrap(R[-12:], oflow, steps)  # use last hour (12 x 5-min)
+            Rf = extrap(R[-12:], oflow, steps)
 
-            # 2) Probe Berlin
             j, i = berlin_point_index(rx, lat, lon)
             rain_future = float(Rf[steps - 1, j, i])
 
-            # 3) Cooldown gating
             now = datetime.utcnow()
             last = datetime.fromisoformat(state["last_alert_ts"].replace("Z", "+00:00"))
             cooled_down = (now - last) > timedelta(minutes=cooldown)
 
             if rain_future >= thr and cooled_down:
-                title = f"Rain in ~{lead_min} minutes (Berlin)"
-                msg = f"Forecast rain rate ≥ {thr:.2f} mm/h. Prepare couriers & ETAs."
-                if use_popup:
-                    desktop_notify(title, msg)
-                slack_notify(slack_url, title, msg)
-
-                state["last_alert_ts"] = now.isoformat() + "Z"
-                try:
-                    with open(STATE_FILE, "w") as f:
-                        json.dump(state, f)
-                except Exception:
-                    pass
-
-        except Exception as e:
-            print("Alert loop error:", e)
-
-        time.sleep(check_interval)
-
-
-if __name__ == "__main__":
-    main_loop()
+                title = f"Rain in ~{l
