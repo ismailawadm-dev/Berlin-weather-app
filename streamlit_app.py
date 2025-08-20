@@ -1,4 +1,4 @@
-# --- add this at the very top of streamlit_app.py ---
+# --- path bootstrap (must be first) ---
 import sys
 from pathlib import Path
 
@@ -8,7 +8,7 @@ for p in (ROOT, SRC):
     p = str(p)
     if p not in sys.path:
         sys.path.insert(0, p)
-# --- end bootstrapping ---
+# --- end bootstrap ---
 import datetime as dt
 import pandas as pd
 import streamlit as st
@@ -21,11 +21,20 @@ from make_features import summarize_ensemble
 from prob_model import ProbModel
 from quant_model import QuantileModel
 from calib import Calibrator
-from alerts.watch_imminent import (
-    fetch_radar_last_hour,
-    reflectivity_to_rainrate,
-    berlin_point_index,
-)
+# --- alerts imports (with fallback for src/ layout) ---
+try:
+    from src.alerts.watch_imminent import (
+        fetch_radar_last_hour,
+        reflectivity_to_rainrate,
+        berlin_point_index,
+    )
+except ModuleNotFoundError:
+    from alerts.watch_imminent import (
+        fetch_radar_last_hour,
+        reflectivity_to_rainrate,
+        berlin_point_index,
+    )
+# --- end alerts imports --- 
 import numpy as np
 
 st.set_page_config(page_title="Berlin Rain Planning", page_icon="☔", layout="centered")
